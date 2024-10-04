@@ -17,12 +17,14 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// IPEvent represents a TCP connection event
+// IPEvent represents a TCP connection event with payload
 type IPEvent struct {
-	SrcIP   uint32
-	DstIP   uint32
-	SrcPort uint16
-	DstPort uint16
+	SrcIP      uint32
+	DstIP      uint32
+	SrcPort    uint16
+	DstPort    uint16
+	PayloadLen uint32
+	Payload    [9000]byte
 }
 
 // intToIP converts a 32-bit integer to a net.IP
@@ -30,28 +32,73 @@ func intToIP(ip uint32) net.IP {
 	return net.IPv4(byte(ip), byte(ip>>8), byte(ip>>16), byte(ip>>24))
 }
 
+func printEvent(event IPEvent) {
+	fmt.Printf("Source: %s:%d -> Destination: %s:%d\n",
+		intToIP(event.SrcIP), event.SrcPort,
+		intToIP(event.DstIP), event.DstPort)
+
+	if event.PayloadLen > 0 {
+		// Adjust the PayloadLen to exclude trailing zeros
+		actualPayloadLen := event.PayloadLen
+
+		// From the end, move backward until we find a non-zero byte
+		for actualPayloadLen > 0 && event.Payload[actualPayloadLen-1] == 0 {
+			actualPayloadLen--
+		}
+
+		if actualPayloadLen == 0 {
+			fmt.Println("No payload")
+			return
+		}
+
+		fmt.Printf("Payload (%d bytes): ", actualPayloadLen)
+		// Print each byte as a character if printable, or as a hex value if not
+		for i := uint32(0); i < actualPayloadLen; i++ {
+			if event.Payload[i] >= 32 && event.Payload[i] <= 126 {
+				fmt.Printf("%c", event.Payload[i])
+			} else {
+				fmt.Printf("\\x%02x", event.Payload[i])
+			}
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("No payload")
+	}
+}
+
 func main() {
 	log.Println("Starting TCP monitor...")
 
-	// Add command-line flag for PIDs
+	// Define a flag for PIDs
 	pidsFlag := flag.String("pids", "", "Comma-separated list of PIDs to monitor")
 	flag.Parse()
 
-	if *pidsFlag == "" {
-		log.Fatal("Please provide PIDs to monitor using the -pids flag")
+	// Parse the PIDs from the flag
+	var pidsToAllow []uint32
+	if *pidsFlag != "" {
+		pidStrings := strings.Split(*pidsFlag, ",")
+		for _, pidStr := range pidStrings {
+			pid, err := strconv.ParseUint(strings.TrimSpace(pidStr), 10, 32)
+			if err != nil {
+				log.Fatalf("Invalid PID: %s", pidStr)
+			}
+			pidsToAllow = append(pidsToAllow, uint32(pid))
+		}
 	}
 
-	pidList := strings.Split(*pidsFlag, ",")
+	// Always include the current process PID
+	pidsToAllow = append(pidsToAllow, uint32(os.Getpid()))
 
+	// Set the memory lock limit
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatalf("Failed to remove memlock limit: %v", err)
 	}
 
+	// Load the compiled eBPF program
 	spec, err := ebpf.LoadCollectionSpec("main.bpf.o")
 	if err != nil {
 		log.Fatalf("Failed to load eBPF program: %v", err)
 	}
-
 	log.Println("eBPF program loaded successfully")
 
 	coll, err := ebpf.NewCollection(spec)
@@ -60,77 +107,66 @@ func main() {
 	}
 	defer coll.Close()
 
-	log.Println("eBPF collection created successfully")
-
-	ipEventsMap, ok := coll.Maps["ip_events"]
-	if !ok {
+	// Get the eBPF maps
+	ipEventsMap := coll.Maps["ip_events"]
+	if ipEventsMap == nil {
 		log.Fatal("Failed to find 'ip_events' map")
 	}
 
-	allowedPidsMap, ok := coll.Maps["allowed_pids"]
-	if !ok {
+	allowedPidsMap := coll.Maps["allowed_pids"]
+	if allowedPidsMap == nil {
 		log.Fatal("Failed to find 'allowed_pids' map")
 	}
 
 	log.Println("Found 'ip_events' and 'allowed_pids' maps")
 
-	// Populate the allowed_pids map
-	for _, pidStr := range pidList {
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			log.Fatalf("Invalid PID: %s", pidStr)
-		}
-		key := uint32(pid)
+	// Add PIDs to the allowed_pids map
+	for _, pid := range pidsToAllow {
 		value := uint8(1)
-		if err := allowedPidsMap.Put(&key, &value); err != nil {
-			log.Fatalf("Failed to add PID %d to allowed_pids map: %v", pid, err)
+		if err := allowedPidsMap.Put(&pid, &value); err != nil {
+			log.Printf("Failed to add PID %d to allowed_pids map: %v", pid, err)
+		} else {
+			log.Printf("Added PID %d to allowed_pids map", pid)
 		}
-		log.Printf("Added PID %d to monitoring list", pid)
+
+		// Verify that the PID was actually added
+		var checkValue uint8
+		if err := allowedPidsMap.Lookup(&pid, &checkValue); err != nil {
+			log.Printf("Failed to lookup PID %d in allowed_pids map: %v", pid, err)
+		} else {
+			log.Printf("Successfully verified PID %d in allowed_pids map", pid)
+		}
 	}
 
 	// Attach the eBPF programs to the kprobes
-	tcpSendmsgProg, ok := coll.Programs["bpf_prog_tcp_sendmsg"]
-	if !ok {
+	tcpSendmsgProg := coll.Programs["bpf_prog_tcp_sendmsg"]
+	if tcpSendmsgProg == nil {
 		log.Fatal("Failed to find 'bpf_prog_tcp_sendmsg' program")
 	}
-
-	tcpRecvmsgProg, ok := coll.Programs["bpf_prog_tcp_recvmsg"]
-	if !ok {
-		log.Fatal("Failed to find 'bpf_prog_tcp_recvmsg' program")
-	}
-
-	renameat2Prog, ok := coll.Programs["probe_renameat2"]
-	if !ok {
-		log.Fatal("Failed to find 'probe_renameat2' program")
-	}
-
-	// Attach the programs to the respective kprobes
 	tcpSendmsgLink, err := link.Kprobe("tcp_sendmsg", tcpSendmsgProg, nil)
 	if err != nil {
 		log.Fatalf("Failed to attach 'tcp_sendmsg' kprobe: %v", err)
 	}
 	defer tcpSendmsgLink.Close()
 
+	tcpRecvmsgProg := coll.Programs["bpf_prog_tcp_recvmsg"]
+	if tcpRecvmsgProg == nil {
+		log.Fatal("Failed to find 'bpf_prog_tcp_recvmsg' program")
+	}
 	tcpRecvmsgLink, err := link.Kprobe("tcp_recvmsg", tcpRecvmsgProg, nil)
 	if err != nil {
 		log.Fatalf("Failed to attach 'tcp_recvmsg' kprobe: %v", err)
 	}
 	defer tcpRecvmsgLink.Close()
 
-	renameat2Link, err := link.Kprobe("do_renameat2", renameat2Prog, nil)
-	if err != nil {
-		log.Fatalf("Failed to attach 'do_renameat2' kprobe: %v", err)
-	}
-	defer renameat2Link.Close()
-
 	log.Println("Attached eBPF programs to kprobes")
 
+	// Channel to handle system signals for graceful exit
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		for {
-			log.Println("Checking for events...")
 			var (
 				key     uint32
 				event   IPEvent
@@ -139,12 +175,12 @@ func main() {
 
 			// Initialize key to zero to start iteration
 			key = 0
-
+			eventCount := 0
 			for {
 				err := ipEventsMap.NextKey(&key, &nextKey)
 				if err != nil {
 					if err == ebpf.ErrKeyNotExist {
-						log.Println("No more entries in map")
+						log.Println("No more keys in map")
 					}
 					break
 				}
@@ -152,23 +188,26 @@ func main() {
 				if err := ipEventsMap.Lookup(&nextKey, &event); err != nil {
 					log.Printf("Failed to lookup event: %v", err)
 				} else {
-					fmt.Printf("Source: %s:%d -> Destination: %s:%d\n",
-						intToIP(event.SrcIP), event.SrcPort,
-						intToIP(event.DstIP), event.DstPort)
+					log.Printf("Found event with key %d", nextKey)
 
+					printEvent(event)
+
+					// Delete the event from the map after processing
 					if err := ipEventsMap.Delete(&nextKey); err != nil {
 						log.Printf("Failed to delete event: %v", err)
 					}
+
+					eventCount++
 				}
 
 				key = nextKey
 			}
+			log.Printf("Processed %d events", eventCount)
 
 			time.Sleep(1 * time.Second)
 		}
 	}()
 
-	log.Printf("Monitoring PIDs: %s", *pidsFlag)
 	log.Println("Waiting for events. Press Ctrl+C to exit.")
 	<-sigCh
 	fmt.Println("Exiting...")
