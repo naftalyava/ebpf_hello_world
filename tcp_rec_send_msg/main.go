@@ -1,11 +1,14 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +32,16 @@ func intToIP(ip uint32) net.IP {
 
 func main() {
 	log.Println("Starting TCP monitor...")
+
+	// Add command-line flag for PIDs
+	pidsFlag := flag.String("pids", "", "Comma-separated list of PIDs to monitor")
+	flag.Parse()
+
+	if *pidsFlag == "" {
+		log.Fatal("Please provide PIDs to monitor using the -pids flag")
+	}
+
+	pidList := strings.Split(*pidsFlag, ",")
 
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatalf("Failed to remove memlock limit: %v", err)
@@ -54,7 +67,26 @@ func main() {
 		log.Fatal("Failed to find 'ip_events' map")
 	}
 
-	log.Println("Found 'ip_events' map")
+	allowedPidsMap, ok := coll.Maps["allowed_pids"]
+	if !ok {
+		log.Fatal("Failed to find 'allowed_pids' map")
+	}
+
+	log.Println("Found 'ip_events' and 'allowed_pids' maps")
+
+	// Populate the allowed_pids map
+	for _, pidStr := range pidList {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			log.Fatalf("Invalid PID: %s", pidStr)
+		}
+		key := uint32(pid)
+		value := uint8(1)
+		if err := allowedPidsMap.Put(&key, &value); err != nil {
+			log.Fatalf("Failed to add PID %d to allowed_pids map: %v", pid, err)
+		}
+		log.Printf("Added PID %d to monitoring list", pid)
+	}
 
 	// Attach the eBPF programs to the kprobes
 	tcpSendmsgProg, ok := coll.Programs["bpf_prog_tcp_sendmsg"]
@@ -136,6 +168,7 @@ func main() {
 		}
 	}()
 
+	log.Printf("Monitoring PIDs: %s", *pidsFlag)
 	log.Println("Waiting for events. Press Ctrl+C to exit.")
 	<-sigCh
 	fmt.Println("Exiting...")

@@ -20,6 +20,13 @@ struct {
     __type(value, struct ip_event_t);
 } ip_events SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);
+    __type(value, __u8);
+} allowed_pids SEC(".maps");
+
 static inline int extract_ip(struct sock *sk, struct ip_event_t *event) {
     event->src_ip = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
     event->dst_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
@@ -32,7 +39,13 @@ static inline int extract_ip(struct sock *sk, struct ip_event_t *event) {
 
 SEC("kprobe/tcp_sendmsg")
 int bpf_prog_tcp_sendmsg(struct pt_regs *ctx) {
-    bpf_printk("tcp_sendmsg called\n");
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u8 *allowed = bpf_map_lookup_elem(&allowed_pids, &pid);
+    if (!allowed) {
+        return 0;  // PID not in the allowed list, skip processing
+    }
+
+    bpf_printk("tcp_sendmsg called for PID %d\n", pid);
     
     struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
     if (!sk) {
@@ -56,7 +69,13 @@ int bpf_prog_tcp_sendmsg(struct pt_regs *ctx) {
 
 SEC("kprobe/tcp_recvmsg")
 int bpf_prog_tcp_recvmsg(struct pt_regs *ctx) {
-    bpf_printk("tcp_recvmsg called\n");
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u8 *allowed = bpf_map_lookup_elem(&allowed_pids, &pid);
+    if (!allowed) {
+        return 0;  // PID not in the allowed list, skip processing
+    }
+
+    bpf_printk("tcp_recvmsg called for PID %d\n", pid);
     
     struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
     if (!sk) {
@@ -81,7 +100,13 @@ int bpf_prog_tcp_recvmsg(struct pt_regs *ctx) {
 SEC("kprobe/do_renameat2")
 int probe_renameat2(struct pt_regs *ctx)
 {
-    bpf_printk("renameat2 called\n");
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u8 *allowed = bpf_map_lookup_elem(&allowed_pids, &pid);
+    if (!allowed) {
+        return 0;  // PID not in the allowed list, skip processing
+    }
+
+    bpf_printk("renameat2 called for PID %d\n", pid);
     return 0;
 }
 
