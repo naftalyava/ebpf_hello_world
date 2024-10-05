@@ -24,7 +24,7 @@ type IPEvent struct {
 	SrcPort    uint16
 	DstPort    uint16
 	PayloadLen uint32
-	Payload    [9000]byte
+	Payload    [2000]byte
 }
 
 // intToIP converts a 32-bit integer to a net.IP
@@ -50,7 +50,7 @@ func printEvent(event IPEvent) {
 			fmt.Println("No payload")
 			return
 		}
-
+		fmt.Printf("---------------------------\n")
 		fmt.Printf("Payload (%d bytes): ", actualPayloadLen)
 		// Print each byte as a character if printable, or as a hex value if not
 		for i := uint32(0); i < actualPayloadLen; i++ {
@@ -180,7 +180,7 @@ func main() {
 				err := ipEventsMap.NextKey(&key, &nextKey)
 				if err != nil {
 					if err == ebpf.ErrKeyNotExist {
-						log.Println("No more keys in map")
+						//log.Println("No more keys in map")
 					}
 					break
 				}
@@ -188,7 +188,7 @@ func main() {
 				if err := ipEventsMap.Lookup(&nextKey, &event); err != nil {
 					log.Printf("Failed to lookup event: %v", err)
 				} else {
-					log.Printf("Found event with key %d", nextKey)
+					//log.Printf("Found event with key %d", nextKey)
 
 					printEvent(event)
 
@@ -202,7 +202,7 @@ func main() {
 
 				key = nextKey
 			}
-			log.Printf("Processed %d events", eventCount)
+			//log.Printf("Processed %d events", eventCount)
 
 			time.Sleep(1 * time.Second)
 		}

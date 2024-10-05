@@ -6,11 +6,9 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 
-#define MAX_PAYLOAD_LENGTH 9000
+#define MAX_PAYLOAD_LENGTH 2000
 #define MAX_LOOP_ITERATIONS 12
 #define CHUNK_SIZE 64
-#define ITER_IOVEC 2
-#define ITER_KVEC 1
 
 struct ip_event_t {
     __u32 src_ip;
@@ -70,11 +68,57 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
     size_t len = 0;
 
     if (iter_type == ITER_IOVEC) {
-        // Handle ITER_IOVEC as before
-        // Implement code to handle ITER_IOVEC if necessary
-        bpf_printk("naftaly: ITER_IOVEC not handled in this example");
-        return -1;
-    } else if (iter_type == ITER_UBUF) {
+        bpf_printk("naftaly: iter_type == ITER_IOVEC");
+        struct iovec *iov = NULL;
+        size_t nr_segs = 0;
+
+        if (BPF_CORE_READ_INTO(&iov, &iter, __iov) < 0) {
+            return -1;
+        }
+        if (BPF_CORE_READ_INTO(&nr_segs, &iter, nr_segs) < 0) {
+            return -1;
+        }
+
+        size_t max_segs = 5;
+        nr_segs = nr_segs > max_segs ? max_segs : nr_segs;
+
+        size_t total_len = 0;
+        for (size_t i = 0; i < nr_segs; i++) {
+            struct iovec iov_entry;
+            struct iovec *current_iov = iov + i;
+
+            if (bpf_probe_read_kernel(&iov_entry, sizeof(iov_entry), current_iov) < 0) {
+                return -1;
+            }
+
+            size_t to_read = iov_entry.iov_len;
+
+             // Ensure 'to_read' is within a valid range
+            if (to_read > MAX_PAYLOAD_LENGTH) {
+                to_read = MAX_PAYLOAD_LENGTH;
+            }
+
+            // Ensure 'total_len' does not exceed 'MAX_PAYLOAD_LENGTH'
+            if (total_len >= MAX_PAYLOAD_LENGTH) {
+                total_len = 0;
+            }
+
+            if (total_len + to_read > MAX_PAYLOAD_LENGTH) {
+                to_read = MAX_PAYLOAD_LENGTH - total_len;
+            }
+
+            // Perform the read operation safely
+            if (bpf_probe_read_user(event->payload, to_read, iov_entry.iov_base) < 0) {
+                break;
+            }
+
+            total_len += to_read;
+
+        }
+
+        event->payload_length = total_len;
+    } 
+    else if (iter_type == ITER_UBUF) {
         // Handle ITER_UBUF
         const void *ubuf = NULL;
         if (BPF_CORE_READ_INTO(&ubuf, &iter, ubuf) < 0) {
@@ -122,7 +166,7 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
 
 
 
-static inline int extract_ip(struct sock *sk, struct ip_event_t *event, struct msghdr *msg) {
+static inline int process_pkt(struct sock *sk, struct ip_event_t *event, struct msghdr *msg) {
     event->src_ip = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
     event->dst_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     event->src_port = BPF_CORE_READ(sk, __sk_common.skc_num);
@@ -157,7 +201,7 @@ int bpf_prog_tcp_sendmsg(struct pt_regs *ctx) {
         return 0;
     }
 
-    extract_ip(sk, event, msg);
+    process_pkt(sk, event, msg);
 
     key = bpf_get_prandom_u32();
     bpf_map_update_elem(&ip_events, &key, event, BPF_ANY);
@@ -186,7 +230,7 @@ int bpf_prog_tcp_recvmsg(struct pt_regs *ctx) {
         return 0;
     }
 
-    extract_ip(sk, event, msg);
+    process_pkt(sk, event, msg);
 
     key = bpf_get_prandom_u32();
     bpf_map_update_elem(&ip_events, &key, event, BPF_ANY);
