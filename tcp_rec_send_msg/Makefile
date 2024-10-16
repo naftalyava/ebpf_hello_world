@@ -13,7 +13,7 @@ userspace: ebpf-go
 	go build
 
 clean:
-	rm -f vmlinux.h main.bpf.o main.skel.h main
+	rm -f vmlinux.h main.bpf.o main.skel.h main bpf_x86_bpfel.go
 	go clean
 
 .PHONY: all clean

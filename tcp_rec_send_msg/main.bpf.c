@@ -7,8 +7,7 @@
 #include <bpf/bpf_endian.h>
 
 #define MAX_PAYLOAD_LENGTH 2000
-#define MAX_LOOP_ITERATIONS 12
-#define CHUNK_SIZE 64
+#define MAX_LOOP_ITERATIONS 7
 
 struct ip_event_t {
     __u32 src_ip;
@@ -40,52 +39,43 @@ struct {
     __type(value, __u8);
 } allowed_pids SEC(".maps");
 
-// Helper function to extract the payload from the msghdr
-static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) {
-    if (!msg) {
-        bpf_printk("naftaly: msg is NULL");
-        return -1;
-    }
 
-    bpf_printk("naftaly: msg address: %llx", (unsigned long long)msg);
-
-    // Read the iov_iter structure from the msg
-    struct iov_iter iter;
-    if (bpf_probe_read_kernel(&iter, sizeof(iter), &msg->msg_iter) < 0) {
-        bpf_printk("naftaly: Failed to read iov_iter structure");
-        return -1;
-    }
-
-    // Read iter_type
-    u8 iter_type = BPF_CORE_READ(&iter, iter_type);
-    bpf_printk("naftaly: iter_type: %d", iter_type);
-
-    // Read count (length)
-    size_t count = BPF_CORE_READ(&iter, count);
-    bpf_printk("naftaly: iov_iter count: %lu", count);
-
-    const void *base = NULL;
-    size_t len = 0;
-
-    if (iter_type == ITER_IOVEC) {
-        bpf_printk("naftaly: iter_type == ITER_IOVEC");
+static inline int handle_iovec(struct iov_iter *iter, struct ip_event_t *event) {
+    bpf_printk("naftaly: iter_type == ITER_IOVEC");
         struct iovec *iov = NULL;
         size_t nr_segs = 0;
 
-        if (BPF_CORE_READ_INTO(&iov, &iter, __iov) < 0) {
-            return -1;
-        }
-        if (BPF_CORE_READ_INTO(&nr_segs, &iter, nr_segs) < 0) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
+    if (BPF_CORE_READ_INTO(&iov, iter, __iov) < 0) {
+        return -1;
+    }
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+    if (BPF_CORE_READ_INTO(&iov, iter, iov) < 0) {
+        return -1;
+    }
+#else
+    // For kernels older than 5.8, we need to access the iov differently
+    struct kvec *kvec;
+    if (BPF_CORE_READ_INTO(&kvec, iter, kvec) < 0) {
+        return -1;
+    }
+    iov = (struct iovec *)kvec;
+#endif
+
+        if (BPF_CORE_READ_INTO(&nr_segs, iter, nr_segs) < 0) {
             return -1;
         }
 
-        size_t max_segs = 5;
-        nr_segs = nr_segs > max_segs ? max_segs : nr_segs;
+        nr_segs = nr_segs > MAX_LOOP_ITERATIONS ? MAX_LOOP_ITERATIONS : nr_segs;
 
         size_t total_len = 0;
         for (size_t i = 0; i < nr_segs; i++) {
             struct iovec iov_entry;
             struct iovec *current_iov = iov + i;
+
+            if (total_len >= MAX_PAYLOAD_LENGTH) {
+                break;
+            }
 
             if (bpf_probe_read_kernel(&iov_entry, sizeof(iov_entry), current_iov) < 0) {
                 return -1;
@@ -98,10 +88,6 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
                 to_read = MAX_PAYLOAD_LENGTH;
             }
 
-            // Ensure 'total_len' does not exceed 'MAX_PAYLOAD_LENGTH'
-            if (total_len >= MAX_PAYLOAD_LENGTH) {
-                total_len = 0;
-            }
 
             if (total_len + to_read > MAX_PAYLOAD_LENGTH) {
                 to_read = MAX_PAYLOAD_LENGTH - total_len;
@@ -109,7 +95,7 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
 
             // Perform the read operation safely
             if (bpf_probe_read_user(event->payload, to_read, iov_entry.iov_base) < 0) {
-                break;
+                return -1;
             }
 
             total_len += to_read;
@@ -117,14 +103,45 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
         }
 
         event->payload_length = total_len;
-    } 
-    else if (iter_type == ITER_UBUF) {
-        // Handle ITER_UBUF
+        return 0;
+}
+
+
+static int handle_ubuf(struct iov_iter *iter, struct ip_event_t *event) {
         const void *ubuf = NULL;
-        if (BPF_CORE_READ_INTO(&ubuf, &iter, ubuf) < 0) {
-            bpf_printk("naftaly: Failed to read ubuf pointer");
+        const void *base = NULL;
+        size_t count = BPF_CORE_READ(iter, count);
+        size_t len = 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
+    if (BPF_CORE_READ_INTO(&ubuf, iter, ubuf.addr) < 0) {
+        bpf_printk("naftaly: Failed to read ubuf.addr pointer");
+        return -1;
+    }
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+    if (BPF_CORE_READ_INTO(&ubuf, iter, ubuf) < 0) {
+        bpf_printk("naftaly: Failed to read ubuf pointer");
+        return -1;
+    }
+#else
+    // For kernels older than 5.8, we need to handle this differently
+    struct bio_vec *bvec;
+    if (BPF_CORE_READ_INTO(&bvec, iter, bvec) < 0) {
+        bpf_printk("naftaly: Failed to read bvec");
+        return -1;
+    }
+    if (bvec) {
+        ubuf = BPF_CORE_READ(bvec, bv_page);
+        if (!ubuf) {
+            bpf_printk("naftaly: bv_page is NULL");
             return -1;
         }
+    } else {
+        bpf_printk("naftaly: bvec is NULL");
+        return -1;
+    }
+#endif
+
         bpf_printk("naftaly: ubuf pointer: %llx", (unsigned long long)ubuf);
 
         if (ubuf && count > 0) {
@@ -134,34 +151,64 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
             bpf_printk("naftaly: ubuf is NULL or count is 0");
             return -1;
         }
+
+
+        if (len > 0 && base != NULL) {
+            // Adjust the read length if necessary
+            size_t read_len = len < MAX_PAYLOAD_LENGTH ? len : MAX_PAYLOAD_LENGTH;
+
+            int read_result = bpf_probe_read_user(event->payload, read_len, base);
+
+            if (read_result < 0) {
+                bpf_printk("naftaly: Failed to read payload, error: %d", read_result);
+                return -1;
+            }
+
+            event->payload_length = read_len;
+
+        } else {
+            bpf_printk("naftaly: Invalid length or base");
+            return -1;
+        }
+
+        return 0;
+}
+
+
+// Helper function to extract the payload from the msghdr
+static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) {
+    if (!msg) {
+        bpf_printk("naftaly: msg is NULL");
+        return -1;
+    }
+    int res = 0;
+
+    // Read the iov_iter structure from the msg
+    struct iov_iter iter;
+    if (bpf_probe_read_kernel(&iter, sizeof(iter), &msg->msg_iter) < 0) {
+        bpf_printk("naftaly: Failed to read iov_iter structure");
+        return -1;
+    }
+
+    // Read iter_type
+    u8 iter_type = BPF_CORE_READ(&iter, iter_type);
+    bpf_printk("naftaly: iter_type: %d", iter_type);
+
+  
+    
+
+    if (iter_type == ITER_IOVEC) {
+        res = handle_iovec(&iter, event);
+    } 
+    else if (iter_type == ITER_UBUF) {
+        res = handle_ubuf(&iter, event);
     } else {
         bpf_printk("naftaly: Unsupported iter_type: %d", iter_type);
         return -1;
     }
 
-    if (len > 0 && base != NULL) {
-        // Adjust the read length if necessary
-        size_t read_len = len < MAX_PAYLOAD_LENGTH ? len : MAX_PAYLOAD_LENGTH;
 
-        int read_result = bpf_probe_read_user(event->payload, read_len, base);
-
-        if (read_result < 0) {
-            bpf_printk("naftaly: Failed to read payload, error: %d", read_result);
-            return -1;
-        }
-
-        event->payload_length = read_len;
-
-        // Optional: print the first few bytes of the payload
-        size_t print_len = read_len < 16 ? read_len : 16;
-        for (int i = 0; i < print_len; i++) {
-            bpf_printk("naftaly: Payload byte %d: %02x", i + 1, event->payload[i]);
-        }
-    } else {
-        bpf_printk("naftaly: Invalid length or base");
-    }
-
-    return 0;
+    return res;
 }
 
 
