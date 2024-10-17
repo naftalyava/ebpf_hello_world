@@ -165,9 +165,9 @@ void run_client(int port, int iterations) {
     
     for (int i = 0; i < iterations; i++) {
         // Create messages with different lengths
-        std::string msg1 = "Buffer 1: Iteration " + std::to_string(i) + " (Short)\n";
-        std::string msg2 = "Buffer 2: Iteration " + std::to_string(i) + " (Medium length message)\n";
-        std::string msg3 = "Buffer 3: Iteration " + std::to_string(i) + " (This is a longer message to demonstrate variable length handling)\n";
+        std::string msg1 = "{Buffer 1: Iteration " + std::to_string(i) + " (Short)}";
+        std::string msg2 = "{Buffer 2: Iteration " + std::to_string(i) + " (Medium length message)}";
+        std::string msg3 = "{Buffer 3: Iteration " + std::to_string(i) + " (This is a longer message to demonstrate variable length handling)}";
         
         struct iovec iov[3];
         iov[0].iov_base = const_cast<char*>(msg1.c_str());
