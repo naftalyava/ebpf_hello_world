@@ -24,7 +24,7 @@ type IPEvent struct {
 	SrcPort    uint16
 	DstPort    uint16
 	PayloadLen uint32
-	Payload    [2000]byte
+	Payload    [4000]byte
 }
 
 // intToIP converts a 32-bit integer to a net.IP
@@ -33,6 +33,7 @@ func intToIP(ip uint32) net.IP {
 }
 
 func printEvent(event IPEvent) {
+	fmt.Printf("---------------------------\n")
 	fmt.Printf("Source: %s:%d -> Destination: %s:%d\n",
 		intToIP(event.SrcIP), event.SrcPort,
 		intToIP(event.DstIP), event.DstPort)
@@ -50,7 +51,6 @@ func printEvent(event IPEvent) {
 			fmt.Println("No payload")
 			return
 		}
-		fmt.Printf("---------------------------\n")
 		fmt.Printf("Payload (%d bytes): ", actualPayloadLen)
 		// Print each byte as a character if printable, or as a hex value if not
 		for i := uint32(0); i < actualPayloadLen; i++ {
@@ -64,6 +64,7 @@ func printEvent(event IPEvent) {
 	} else {
 		fmt.Println("No payload")
 	}
+	fmt.Printf("---------------------------\n")
 }
 
 func main() {

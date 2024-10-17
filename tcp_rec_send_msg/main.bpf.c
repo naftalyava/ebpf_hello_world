@@ -6,7 +6,8 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 
-#define MAX_PAYLOAD_LENGTH 2000
+#define MAX_PAYLOAD_LENGTH 4000
+#define MAX_READ_LENGTH 2000
 #define MAX_LOOP_ITERATIONS 7
 
 struct ip_event_t {
@@ -73,29 +74,23 @@ static inline int handle_iovec(struct iov_iter *iter, struct ip_event_t *event) 
             struct iovec iov_entry;
             struct iovec *current_iov = iov + i;
 
-            if (total_len >= MAX_PAYLOAD_LENGTH) {
-                break;
-            }
-
             if (bpf_probe_read_kernel(&iov_entry, sizeof(iov_entry), current_iov) < 0) {
                 return -1;
             }
 
             size_t to_read = iov_entry.iov_len;
 
-             // Ensure 'to_read' is within a valid range
-            if (to_read > MAX_PAYLOAD_LENGTH) {
-                to_read = MAX_PAYLOAD_LENGTH;
+            if (to_read > MAX_READ_LENGTH) {
+                        return -1;
             }
 
-
-            if (total_len + to_read > MAX_PAYLOAD_LENGTH) {
-                to_read = MAX_PAYLOAD_LENGTH - total_len;
+            if (total_len + to_read > MAX_READ_LENGTH) {
+                        return -1;
             }
 
-            // Perform the read operation safely
-            if (bpf_probe_read_user(event->payload, to_read, iov_entry.iov_base) < 0) {
-                return -1;
+            // Read from user-space into event->payload
+            if (bpf_probe_read_user(&event->payload[total_len], to_read, iov_entry.iov_base) < 0) {
+                        return -1;
             }
 
             total_len += to_read;
@@ -200,9 +195,12 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
     if (iter_type == ITER_IOVEC) {
         res = handle_iovec(&iter, event);
     } 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
     else if (iter_type == ITER_UBUF) {
         res = handle_ubuf(&iter, event);
-    } else {
+    }
+#endif
+    else {
         bpf_printk("naftaly: Unsupported iter_type: %d", iter_type);
         return -1;
     }
@@ -234,6 +232,7 @@ int bpf_prog_tcp_sendmsg(struct pt_regs *ctx) {
     if (!allowed) {
         return 0;
     }
+    bpf_printk("naftaly: bpf_prog_tcp_sendmsg");
 
     struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
     struct msghdr *msg = (struct msghdr *)PT_REGS_PARM2(ctx);
@@ -263,6 +262,7 @@ int bpf_prog_tcp_recvmsg(struct pt_regs *ctx) {
     if (!allowed) {
         return 0;
     }
+    bpf_printk("naftaly: bpf_prog_tcp_recvmsg");
 
     struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
     struct msghdr *msg = (struct msghdr *)PT_REGS_PARM2(ctx);
