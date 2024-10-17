@@ -108,12 +108,7 @@ static int handle_ubuf(struct iov_iter *iter, struct ip_event_t *event) {
         size_t count = BPF_CORE_READ(iter, count);
         size_t len = 0;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
-    if (BPF_CORE_READ_INTO(&ubuf, iter, ubuf.addr) < 0) {
-        bpf_printk("naftaly: Failed to read ubuf.addr pointer");
-        return -1;
-    }
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 18, 0)
     if (BPF_CORE_READ_INTO(&ubuf, iter, ubuf) < 0) {
         bpf_printk("naftaly: Failed to read ubuf pointer");
         return -1;
@@ -195,7 +190,7 @@ static inline int extract_payload(struct msghdr *msg, struct ip_event_t *event) 
     if (iter_type == ITER_IOVEC) {
         res = handle_iovec(&iter, event);
     } 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 19, 0)
     else if (iter_type == ITER_UBUF) {
         res = handle_ubuf(&iter, event);
     }

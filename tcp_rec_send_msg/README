@@ -1,0 +1,100 @@
+# eBPF TCP Monitor
+
+This project is an eBPF (Extended Berkeley Packet Filter) program designed to monitor TCP connections on a Linux system. It uses Go for the userspace component and C for the eBPF program. The program captures TCP send and receive events, including payload data, for specified processes.
+
+## Features
+
+- Monitors TCP sendmsg and recvmsg operations
+- Captures source and destination IP addresses and ports
+- Retrieves payload data (up to 2000 bytes)
+- Allows filtering by Process ID (PID)
+- Real-time display of captured TCP events
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed on your Ubuntu system:
+
+- Go 1.23.2
+- Linux headers
+- Clang
+- Make
+- libbpf-dev
+- LLVM
+- bpftool
+
+## Installation
+
+1. Install Go 1.23.2:
+   ```
+   wget https://go.dev/dl/go1.23.2.linux-amd64.tar.gz
+   sudo tar -C /usr/local -xzf go1.23.2.linux-amd64.tar.gz
+   echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+2. Install other dependencies:
+   ```
+   sudo apt-get update
+   sudo apt-get install linux-tools-$(uname -r) clang make libbpf-dev llvm
+   ```
+
+3. Set up bpftool:
+   ```
+   sudo ln -s /usr/sbin/bpftool /usr/local/bin/bpftool
+   ```
+
+## Building the Project
+
+To build the project, simply run:
+
+```
+make
+```
+
+This will:
+1. Generate `vmlinux.h` from the kernel's BTF information.
+2. Compile the eBPF program (`main.bpf.c`) into an object file.
+3. Generate Go code from the eBPF object file.
+4. Build the userspace program.
+
+## Project Structure
+
+- `main.bpf.c`: The eBPF program written in C.
+- `main.go`: The userspace program written in Go.
+- `Makefile`: Defines the build process.
+
+## Usage
+
+Run the program with root privileges:
+
+```
+sudo ./userspace [flags]
+```
+
+### Flags
+
+- `-pids`: Comma-separated list of Process IDs (PIDs) to monitor. If not specified, the program will monitor all processes.
+
+Example:
+```
+sudo ./userspace -pids 1234,5678
+```
+
+This will monitor TCP connections for processes with PIDs 1234 and 5678, as well as the current process.
+
+### Output
+
+The program will display TCP connection events in real-time, including:
+- Source IP and port
+- Destination IP and port
+- Payload data (if available)
+
+Payload data will be displayed as printable characters when possible, with non-printable characters shown as hex values.
+
+## Cleaning Up
+
+To clean the project directory and remove generated files:
+
+```
+make clean
+```
