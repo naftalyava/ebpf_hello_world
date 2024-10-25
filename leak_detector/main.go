@@ -120,7 +120,7 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	// Start a ticker to periodically collect and display leaks
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
 	done := make(chan bool)
@@ -137,9 +137,9 @@ func main() {
 				if len(leaks) == 0 {
 					log.Println("No leaks detected.")
 				} else {
-					log.Printf("Current leaks (%d):", len(leaks))
+					log.Printf("Current possible leaks (%d):", len(leaks))
 					for addr, info := range leaks {
-						log.Printf("Leak at address: 0x%x, size: %d bytes, StackID: %d", addr, info.Size, info.StackID)
+						log.Printf("Possible leak at address: 0x%x, size: %d bytes, StackID: %d", addr, info.Size, info.StackID)
 						// Optionally resolve stack trace here
 					}
 				}
